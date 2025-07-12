@@ -1,3 +1,4 @@
+
 import streamlit as st
 import pandas as pd
 from datetime import date
@@ -5,10 +6,6 @@ from datetime import date
 # Format numbers
 def shorten_currency(amount):
     return f"₹{amount/1_00_000:.1f}L" if amount < 1_00_00_000 else f"₹{amount/1_00_00_000:.1f}Cr"
-
-
-import pandas as pd
-from datetime import date
 
 st.set_page_config("TMF Accounting Dashboard", layout="wide")
 
@@ -60,7 +57,8 @@ col6.metric("Stock Purchased (Items)", f"{stock_purchased_qty}")
 
 # Inventory Table
 st.subheader("📦 Stock Purchased")
-st.dataframe(inventory[['Brand', 'Model', 'Quantity Purchased', 'Unit Cost', 'Quantity Left']])
+inventory['Total Cost'] = inventory['Quantity Purchased'] * inventory['Unit Cost']
+st.dataframe(inventory[['Brand', 'Model', 'Quantity Purchased', 'Unit Cost', 'Total Cost', 'Quantity Left']])
 
 # Sales & Profit Table
 st.subheader("🧾 Sales & Profit")
@@ -73,7 +71,6 @@ sales['Unit Cost'] = sales.apply(get_unit_cost, axis=1)
 sales['Total Revenue'] = sales['Quantity Sold'] * sales['Selling Price']
 sales['Profit'] = (sales['Selling Price'] - sales['Unit Cost']) * sales['Quantity Sold']
 st.dataframe(sales[['Date', 'Brand', 'Model', 'Quantity Sold', 'Unit Cost', 'Selling Price', 'Total Revenue', 'Profit']])
-
 
 # Profit Sharing
 st.subheader("🤝 Profit Sharing")
@@ -101,7 +98,6 @@ else:
 profit_df.to_csv("data/profit.csv", index=False)
 st.dataframe(profit_df)
 
-
 # Add Sale
 st.subheader("➕ Add a Sale")
 with st.form("Add Sale"):
@@ -112,20 +108,19 @@ with st.form("Add Sale"):
     submit = st.form_submit_button("Add Sale")
 
     if submit:
-        new_sale = {
-            "Date": str(date.today()),
-            "Brand": brand,
-            "Model": model,
-            "Quantity Sold": qty,
-            "Selling Price": price
-        }
-        sales = pd.concat([sales, pd.DataFrame([new_sale])], ignore_index=True)
-        sales.to_csv("data/sales.csv", index=False)
-        inventory.loc[(inventory.Brand == brand) & (inventory.Model == model), "Quantity Left"] -= qty
-        inventory.to_csv("data/inventory.csv", index=False)
-        st.success("Sale recorded!")
-
-
+        if st.checkbox("✅ Confirm you want to add this sale"):
+            new_sale = {
+                "Date": str(date.today()),
+                "Brand": brand,
+                "Model": model,
+                "Quantity Sold": qty,
+                "Selling Price": price
+            }
+            sales = pd.concat([sales, pd.DataFrame([new_sale])], ignore_index=True)
+            sales.to_csv("data/sales.csv", index=False)
+            inventory.loc[(inventory.Brand == brand) & (inventory.Model == model), "Quantity Left"] -= qty
+            inventory.to_csv("data/inventory.csv", index=False)
+            st.success("Sale recorded!")
 
 # Manage Sales Entries
 st.subheader("🗑️ Manage Sales Entries")
@@ -139,11 +134,12 @@ if not sales.empty:
         col4.write(f"₹{row['Selling Price']}")
         col5.write(f"₹{row['Profit']}")
         if col6.button("Delete", key=f"delete_{i}"):
-            inventory.loc[(inventory.Brand == row["Brand"]) & (inventory.Model == row["Model"]), "Quantity Left"] += row["Quantity Sold"]
-            sales = sales.drop(index=i).reset_index(drop=True)
-            sales.to_csv("data/sales.csv", index=False)
-            inventory.to_csv("data/inventory.csv", index=False)
-            st.success("Sale deleted! Please refresh the page manually to see changes.")
-            st.stop()
+            if st.checkbox(f"☑️ Confirm deletion for {row['Brand']} {row['Model']} - {row['Date']}", key=f"confirm_{i}"):
+                inventory.loc[(inventory.Brand == row["Brand"]) & (inventory.Model == row["Model"]), "Quantity Left"] += row["Quantity Sold"]
+                sales = sales.drop(index=i).reset_index(drop=True)
+                sales.to_csv("data/sales.csv", index=False)
+                inventory.to_csv("data/inventory.csv", index=False)
+                st.success("Sale deleted! Please refresh the page manually to see changes.")
+                st.stop()
 else:
     st.info("No sales entries to manage.")
