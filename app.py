@@ -13,6 +13,10 @@ st.set_page_config("TMF Accounting Dashboard", layout="wide")
 inventory = pd.read_csv("data/inventory.csv")
 sales = pd.read_csv("data/sales.csv")
 
+# Ensure Buyer Name column exists
+if 'Buyer Name' not in sales.columns:
+    sales['Buyer Name'] = ""
+
 # Recalculate stock left from past sales
 inventory['Quantity Left'] = inventory['Quantity Purchased']
 for i, sale in sales.iterrows():
@@ -45,7 +49,7 @@ avg_daily_profit = profit / max(1, len(sales['Date'].unique()))
 break_even_days = (investment_total - profit) / avg_daily_profit if avg_daily_profit > 0 else float('inf')
 break_even_estimate = f"{int(break_even_days)} days" if break_even_days != float('inf') else "Not yet profitable"
 
-# Metric cards in a single row
+# Metric cards
 col1, col2, col3, col4, col5, col6, col7 = st.columns(7)
 col1.metric("Total Investment", shorten_currency(investment_total))
 col2.metric("Investment Utilised", shorten_currency(inventory['Total Cost'].sum()))
@@ -57,12 +61,10 @@ col7.metric("Stock Left (Items)", f"{stock_items}")
 
 # Inventory Table
 st.subheader("📦 Stock Purchased")
-inventory['Total Cost'] = inventory['Quantity Purchased'] * inventory['Unit Cost']
 st.dataframe(inventory[['Item', 'Quantity Purchased', 'Unit Cost', 'Quantity Left', 'Total Cost']])
 
 # Sales & Profit Table
 st.subheader("🧾 Sales & Profit")
-
 def get_unit_cost(row):
     match = inventory[inventory.Item == row.Item]
     return match['Unit Cost'].iloc[0] if not match.empty else 0
@@ -70,11 +72,11 @@ def get_unit_cost(row):
 sales['Unit Cost'] = sales.apply(get_unit_cost, axis=1)
 sales['Total Revenue'] = sales['Quantity Sold'] * sales['Selling Price']
 sales['Profit'] = (sales['Selling Price'] - sales['Unit Cost']) * sales['Quantity Sold']
-st.dataframe(sales[['Date', 'Item', 'Quantity Sold', 'Unit Cost', 'Selling Price', 'Total Revenue', 'Profit']])
+st.dataframe(sales[['Date', 'Buyer Name', 'Item', 'Quantity Sold', 'Unit Cost', 'Selling Price', 'Total Revenue', 'Profit']])
 
 # Profit Sharing
 st.subheader("🤝 Profit Sharing")
-man_a_net = profit * 0.24
+man_a_net = profit * 0.42
 man_b_total = profit * 0.40
 man_c_share = profit * 0.18
 
@@ -104,11 +106,13 @@ with st.form("Add Sale"):
     item = st.selectbox("Item", inventory["Item"].unique())
     qty = st.number_input("Quantity Sold", min_value=1)
     price = st.number_input("Selling Price", min_value=1)
+    buyer = st.text_input("Buyer Name")
     submit = st.form_submit_button("Add Sale")
 
     if submit:
         new_sale = {
             "Date": str(date.today()),
+            "Buyer Name": buyer,
             "Item": item,
             "Quantity Sold": qty,
             "Selling Price": price
@@ -126,10 +130,10 @@ if not sales.empty:
         row = sales.iloc[i]
         col1, col2, col3, col4, col5, col6 = st.columns([2, 2, 1, 2, 2, 1])
         col1.write(row["Date"])
-        col2.write(row["Item"])
+        col2.write(f"{row['Item']} ({row['Buyer Name']})")
         col3.write(f"{row['Quantity Sold']} pcs")
         col4.write(f"₹{row['Selling Price']}")
-        col5.write(f"₹{row['Profit']}")
+        col5.write(f"₹{row['Profit']:.0f}")
         if col6.button("Delete", key=f"delete_{i}"):
             inventory.loc[inventory.Item == row["Item"], "Quantity Left"] += row["Quantity Sold"]
             sales = sales.drop(index=i).reset_index(drop=True)
