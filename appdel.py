@@ -63,10 +63,7 @@ inventory_totals = pd.DataFrame([{
     "Unit Cost": "",
     "Total Cost": inventory["Total Cost"].sum()
 }])
-formatted_inventory = pd.concat([inventory, inventory_totals], ignore_index=True)
-formatted_inventory["Unit Cost"] = formatted_inventory["Unit Cost"].apply(lambda x: f"₹{x:,.2f}" if x != "" else "")
-formatted_inventory["Total Cost"] = formatted_inventory["Total Cost"].apply(lambda x: f"₹{x:,.2f}")
-st.dataframe(formatted_inventory, use_container_width=True, hide_index=True)
+st.dataframe(pd.concat([inventory, inventory_totals], ignore_index=True)[["Item", "Quantity Purchased", "Quantity Left", "Unit Cost", "Total Cost"]])
 
 # Sales & Profit
 st.subheader("🧾 Sales & Profit")
@@ -80,6 +77,7 @@ sales['Profit'] = (sales['Selling Price'] - sales['Unit Cost']) * sales['Quantit
 
 sales_totals = pd.DataFrame([{
     "Date": "Total",
+    "Buyer Name": "",
     "Item": "",
     "Quantity Sold": sales["Quantity Sold"].sum(),
     "Unit Cost": "",
@@ -87,12 +85,60 @@ sales_totals = pd.DataFrame([{
     "Total Revenue": sales["Total Revenue"].sum(),
     "Profit": sales["Profit"].sum()
 }])
-formatted_sales = pd.concat([sales, sales_totals], ignore_index=True)
-formatted_sales["Unit Cost"] = formatted_sales["Unit Cost"].apply(lambda x: f"₹{x:,.2f}" if x != "" else "")
-formatted_sales["Selling Price"] = formatted_sales["Selling Price"].apply(lambda x: f"₹{x:,.2f}" if x != "" else "")
-formatted_sales["Total Revenue"] = formatted_sales["Total Revenue"].apply(lambda x: f"₹{x:,.2f}")
-formatted_sales["Profit"] = formatted_sales["Profit"].apply(lambda x: f"₹{x:,.2f}")
-st.dataframe(formatted_sales, use_container_width=True, hide_index=True)
+st.dataframe(pd.concat([sales, sales_totals], ignore_index=True)[["Date", "Buyer Name", "Item", "Quantity Sold", "Unit Cost", "Selling Price", "Total Revenue", "Profit"]])
+
+# Add Sale
+st.subheader("➕ Add a Sale")
+with st.form("Add Sale"):
+    item = st.selectbox("Item", inventory["Item"].unique())
+    buyer = st.text_input("Buyer Name")
+    qty = st.number_input("Quantity Sold", min_value=1)
+    price = st.number_input("Selling Price", min_value=0.01, format="%.2f")
+    submit = st.form_submit_button("Add Sale")
+
+    if submit:
+        new_sale = {
+            "Date": str(date.today()),
+            "Buyer Name": buyer,
+            "Item": item,
+            "Quantity Sold": qty,
+            "Selling Price": price
+        }
+        sales = pd.concat([sales, pd.DataFrame([new_sale])], ignore_index=True)
+        sales.to_csv("data/sales.csv", index=False)
+        inventory.loc[inventory.Item == item, "Quantity Left"] -= qty
+        inventory.to_csv("data/inventory.csv", index=False)
+        st.success("Sale recorded!")
+
+# Manage Sales
+st.subheader("🗑️ Manage Sales Entries")
+password = st.session_state.get("delete_password", None)
+
+for i, row in sales.iterrows():
+    col1, col2, col3, col4, col5, col6 = st.columns([2, 2, 1, 2, 2, 2])
+    col1.write(row["Date"])
+    col2.write(row["Item"])
+    col3.write(f"{row['Quantity Sold']} pcs")
+    col4.write(f"₹{row['Selling Price']}")
+    col5.write(f"₹{row['Profit']}")
+
+    delete_trigger = col6.button("Delete", key=f"delete_btn_{i}")
+
+    if delete_trigger:
+        st.session_state[f"show_pw_{i}"] = True
+
+    if st.session_state.get(f"show_pw_{i}", False):
+        pw = col6.text_input("Password", type="password", key=f"pw_input_{i}")
+        if pw == "admin123":  # secure this in production!
+            inventory.loc[inventory.Item == row["Item"], "Quantity Left"] += row["Quantity Sold"]
+            sales = sales.drop(index=i).reset_index(drop=True)
+            sales.to_csv("data/sales.csv", index=False)
+            inventory.to_csv("data/inventory.csv", index=False)
+            st.success("Sale deleted! Please refresh the page manually.")
+            st.stop()
+        elif pw:
+            st.error("Incorrect password.")
+
 
 # Profit Sharing
 st.subheader("🤝 Profit Sharing")
@@ -132,60 +178,3 @@ st.dataframe(
     use_container_width=True,
     hide_index=True
 )
-
-
-# Add Sale
-st.subheader("➕ Add a Sale")
-with st.form("Add Sale"):
-    item = st.selectbox("Item", inventory["Item"].unique())
-    #buyer = st.text_input("Buyer Name")
-    qty = st.number_input("Quantity Sold", min_value=1)
-    price = st.number_input("Selling Price", min_value=0.01, format="%.2f")
-    submit = st.form_submit_button("Add Sale")
-
-    if submit:
-        new_sale = {
-            "Date": str(date.today()),
-            #"Buyer Name": buyer,
-            "Item": item,
-            "Quantity Sold": qty,
-            "Selling Price": price
-        }
-        sales = pd.concat([sales, pd.DataFrame([new_sale])], ignore_index=True)
-        sales.to_csv("data/sales.csv", index=False)
-        inventory.loc[inventory.Item == item, "Quantity Left"] -= qty
-        inventory.to_csv("data/inventory.csv", index=False)
-        st.success("Sale recorded!")
-
-# Manage Sales
-st.subheader("🗑️ Manage Sales Entries")
-password = st.session_state.get("delete_password", None)
-
-for i, row in sales.iterrows():
-    col1, col2, col3, col4, col5, col6 = st.columns([2, 2, 1, 2, 2, 2])
-    col1.write(row["Date"])
-    col2.write(row["Item"])
-    col3.write(f"{row['Quantity Sold']} pcs")
-    col4.write(f"₹{row['Selling Price']}")
-    #col5.write(f"₹{row['Profit']}")
-    col5.write(f"₹{row['Profit']:.2f}")
-
-
-    delete_trigger = col6.button("Delete", key=f"delete_btn_{i}")
-
-    if delete_trigger:
-        st.session_state[f"show_pw_{i}"] = True
-
-    if st.session_state.get(f"show_pw_{i}", False):
-        pw = col6.text_input("Password", type="password", key=f"pw_input_{i}")
-        if pw == "admin123":  # secure this in production!
-            inventory.loc[inventory.Item == row["Item"], "Quantity Left"] += row["Quantity Sold"]
-            sales = sales.drop(index=i).reset_index(drop=True)
-            sales.to_csv("data/sales.csv", index=False)
-            inventory.to_csv("data/inventory.csv", index=False)
-            st.success("Sale deleted! Please refresh the page manually.")
-            st.stop()
-        elif pw:
-            st.error("Incorrect password.")
-
-

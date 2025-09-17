@@ -80,6 +80,7 @@ sales['Profit'] = (sales['Selling Price'] - sales['Unit Cost']) * sales['Quantit
 
 sales_totals = pd.DataFrame([{
     "Date": "Total",
+    "Buyer Name": "",
     "Item": "",
     "Quantity Sold": sales["Quantity Sold"].sum(),
     "Unit Cost": "",
@@ -138,7 +139,7 @@ st.dataframe(
 st.subheader("➕ Add a Sale")
 with st.form("Add Sale"):
     item = st.selectbox("Item", inventory["Item"].unique())
-    #buyer = st.text_input("Buyer Name")
+    buyer = st.text_input("Buyer Name")
     qty = st.number_input("Quantity Sold", min_value=1)
     price = st.number_input("Selling Price", min_value=0.01, format="%.2f")
     submit = st.form_submit_button("Add Sale")
@@ -146,7 +147,7 @@ with st.form("Add Sale"):
     if submit:
         new_sale = {
             "Date": str(date.today()),
-            #"Buyer Name": buyer,
+            "Buyer Name": buyer,
             "Item": item,
             "Quantity Sold": qty,
             "Selling Price": price
@@ -167,9 +168,7 @@ for i, row in sales.iterrows():
     col2.write(row["Item"])
     col3.write(f"{row['Quantity Sold']} pcs")
     col4.write(f"₹{row['Selling Price']}")
-    #col5.write(f"₹{row['Profit']}")
-    col5.write(f"₹{row['Profit']:.2f}")
-
+    col5.write(f"₹{row['Profit']}")
 
     delete_trigger = col6.button("Delete", key=f"delete_btn_{i}")
 
