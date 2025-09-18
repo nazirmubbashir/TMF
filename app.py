@@ -39,7 +39,7 @@ for _, row in sales.iterrows():
     cogs += unit_cost * row['Quantity Sold']
 
 profit = total_sales_revenue - cogs
-investment_left = investment_total - inventory['Total Cost'].sum() + profit
+investment_left = investment_total - inventory['Total Cost'].sum() #+ profit
 avg_daily_profit = profit / max(1, len(sales['Date'].unique()))
 break_even_days = (investment_total - profit) / avg_daily_profit if avg_daily_profit > 0 else float('inf')
 break_even_estimate = f"{int(break_even_days)} days" if break_even_days != float('inf') else "Not yet profitable"
