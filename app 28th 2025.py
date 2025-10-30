@@ -1,4 +1,4 @@
-# app.py (enhanced: Specific-Lot sales mode + reactive Add Sale; fixed f-string quoting)
+# app.py
 import streamlit as st
 import pandas as pd
 from datetime import date, datetime
@@ -11,7 +11,7 @@ st.set_page_config("TMF Accounting Dashboard", layout="wide")
 # ------------------------------------------------------------------
 DATA_DIR = Path("data")
 INV_PATH = DATA_DIR / "inventory.csv"     # one row = one purchase lot (exact unit cost kept)
-SALES_PATH = DATA_DIR / "sales.csv"       # one row = one sale entry (optionally tied to a Lot ID)
+SALES_PATH = DATA_DIR / "sales.csv"       # one row = one sale entry
 PROFIT_PATH = DATA_DIR / "profit.csv"
 
 ADMIN_PW = "admin123"
@@ -26,9 +26,8 @@ def ensure_data_files():
         pd.DataFrame(columns=[
             "Item","Category","Lot ID","Purchase Date","Quantity Purchased","Quantity Left","Unit Cost"
         ]).to_csv(INV_PATH, index=False)
-    # include optional Lot ID in sales schema to support Specific-Lot sales
     if not SALES_PATH.exists():
-        pd.DataFrame(columns=["Date","Item","Category","Quantity Sold","Selling Price","Lot ID"]).to_csv(SALES_PATH, index=False)
+        pd.DataFrame(columns=["Date","Item","Category","Quantity Sold","Selling Price"]).to_csv(SALES_PATH, index=False)
     if not PROFIT_PATH.exists():
         pd.DataFrame(columns=["Period","Total Profit","Man A (Net)","Man B","Man C (From A)"]).to_csv(PROFIT_PATH, index=False)
 
@@ -79,13 +78,8 @@ def parse_date_safe(s):
     except Exception:
         return None
 
-# ----------------------- Mixed FIFO/Specific-Lot core ------------------------
+# ----------------------- FIFO core ---------------------------------
 def replay_fifo_and_inventory(inv_df: pd.DataFrame, sales_df: pd.DataFrame):
-    """
-    Replays sales into inventory to compute COGS per sale row and new Quantity Left per lot.
-    - If a sales row has Lot ID (notna), consume ONLY from that lot (Specific-Lot).
-    - Else consume by FIFO across lots for that Item+Category.
-    """
     if inv_df.empty:
         cogs_per_row = [0.0] * len(sales_df)
         inv_left = inv_df.copy()
@@ -105,11 +99,10 @@ def replay_fifo_and_inventory(inv_df: pd.DataFrame, sales_df: pd.DataFrame):
     lots = lots.sort_values(by=["Item","Category","_pdate","Lot ID"], kind="stable").reset_index(drop=True)
     lots["remaining"] = lots["Quantity Purchased"]  # recompute fresh
 
-    # sort sales by date (stable) and keep original index for cogs mapping
     if not sales_df.empty:
         s = sales_df.copy()
-        s["_sdate"] = s["Date"].apply(parse_date_safe) if "Date" in s.columns else None
-        s = s.sort_values(by=["_sdate"]).reset_index(drop=False)  # "index" column is original row index
+        s["_sdate"] = s["Date"].apply(parse_date_safe)
+        s = s.sort_values(by=["_sdate"]).reset_index(drop=False)  # keep original position in "index"
     else:
         s = pd.DataFrame(columns=list(sales_df.columns)+["_sdate"])
         s["_sdate"] = None
@@ -120,34 +113,14 @@ def replay_fifo_and_inventory(inv_df: pd.DataFrame, sales_df: pd.DataFrame):
         item = srow.get("Item")
         cat = srow.get("Category")
         qty = to_int(srow.get("Quantity Sold"), 0)
-        lot_id = srow.get("Lot ID") if "Lot ID" in srow else None
-        if pd.isna(lot_id):
-            lot_id = None
-        # sanitize lot_id to int when provided
-        if lot_id is not None:
-            try:
-                lot_id = int(lot_id)
-            except:
-                lot_id = None
-
         if qty <= 0:
             cogs_map[srow["index"]] = 0.0
             continue
-
-        # choose lots
-        if lot_id is not None:
-            # Specific lot: restrict to exactly this lot
-            mask = (lots["Item"]==item) & (lots["Category"]==cat) & (lots["Lot ID"]==lot_id)
-            use_lots = lots[mask]
-        else:
-            # FIFO path: all lots for item+category in purchase-date order
-            mask = (lots["Item"]==item) & (lots["Category"]==cat)
-            use_lots = lots[mask]
-
+        mask = (lots["Item"]==item) & (lots["Category"]==cat)
+        use_lots = lots[mask]
         if use_lots.empty:
             cogs_map[srow["index"]] = 0.0
             continue
-
         cost_total = 0.0
         qty_left_to_consume = qty
         for li in use_lots.index:
@@ -160,7 +133,6 @@ def replay_fifo_and_inventory(inv_df: pd.DataFrame, sales_df: pd.DataFrame):
             cost_total += consume * float(lots.at[li, "Unit Cost"])
             lots.at[li, "remaining"] = lot_remaining - consume
             qty_left_to_consume -= consume
-
         cogs_map[srow["index"]] = float(cost_total)
 
     lots_out = lots.copy()
@@ -186,7 +158,6 @@ inventory = pd.read_csv(INV_PATH)
 sales = pd.read_csv(SALES_PATH)
 profit_df = pd.read_csv(PROFIT_PATH)
 
-# inventory migrations
 if "Category" not in inventory.columns:
     inventory["Category"] = "Crown"
 if "Lot ID" not in inventory.columns:
@@ -200,7 +171,6 @@ for col in ["Quantity Purchased","Quantity Left"]:
     inventory[col] = pd.to_numeric(inventory.get(col, 0), errors="coerce").fillna(0).astype(int)
 inventory["Unit Cost"] = pd.to_numeric(inventory.get("Unit Cost", 0.0), errors="coerce").fillna(0.0).astype(float)
 
-# sales migrations (add Lot ID if missing)
 if "Category" not in sales.columns:
     item_to_cat = dict(zip(inventory["Item"], inventory["Category"]))
     sales["Category"] = sales["Item"].map(item_to_cat).fillna("Crown")
@@ -208,13 +178,10 @@ if "Quantity Sold" not in sales.columns:
     sales["Quantity Sold"] = 0
 if "Selling Price" not in sales.columns:
     sales["Selling Price"] = 0.0
-if "Lot ID" not in sales.columns:
-    sales["Lot ID"] = pd.NA  # new column for specific-lot sales; NaN means FIFO
 for col in ["Quantity Sold","Selling Price"]:
     sales[col] = pd.to_numeric(sales[col], errors="coerce").fillna(0.0)
 sales["Quantity Sold"] = sales["Quantity Sold"].astype(int)
 
-# recompute inventory left based on all sales (FIFO or specific-lot)
 inventory = recompute_and_persist_inventory_left(inventory, sales)
 
 # ------------------------------------------------------------------
@@ -223,7 +190,7 @@ inventory = recompute_and_persist_inventory_left(inventory, sales)
 def compute_metrics(inv_df, sales_df, investment_total=None):
     inv_df = inv_df.copy()
     inv_df["Total Cost"] = inv_df["Quantity Purchased"] * inv_df["Unit Cost"]
-    # COGS for all sales via mixed engine
+    # FIFO COGS for all sales
     if not sales_df.empty:
         cogs_list, _ = replay_fifo_and_inventory(inv_df, sales_df)
         total_cogs = sum(cogs_list)
@@ -236,10 +203,10 @@ def compute_metrics(inv_df, sales_df, investment_total=None):
     stock_items = int(inv_df["Quantity Left"].sum())
     out = {"profit": profit, "stock_left_qty": stock_items, "stock_value": stock_value}
     if investment_total is not None:
-        # Utilised = current stock value; Left = total - stock value
+        # Revamped capital logic: Utilised = current stock value; Left = total - stock value
         investment_used = stock_value
         investment_left = investment_total - investment_used
-        # Break-even based on realised profit per distinct sales day
+        # Break-even (rough): based on realised profit per distinct sales day
         if not sales_df.empty and "Date" in sales_df.columns:
             try:
                 days = pd.to_datetime(sales_df["Date"]).dt.date.nunique()
@@ -272,25 +239,40 @@ def metrics_block(m, show_investment=True):
             cols = st.columns(2)
             cols[0].metric("Total Profit", shorten_currency(m["profit"]))
             cols[1].metric("Stock Left (Items)", f"{m['stock_left_qty']}")
+            # Stock Value (cost) intentionally hidden in category view per request
+
 
 def stock_table(inv_df):
     inv_df = inv_df.copy()
+    # Compute Total Cost at lot level
     inv_df["Total Cost"] = inv_df["Quantity Purchased"] * inv_df["Unit Cost"]
+
+    # Prepare formatted table
     inv_fmt = inv_df.copy()
     inv_fmt["Unit Cost"] = inv_fmt["Unit Cost"].map(money)
     inv_fmt["Total Cost"] = inv_fmt["Total Cost"].map(money)
+
+    # Compute totals (cost-only, no profit)
     total_purchased = int(inv_df["Quantity Purchased"].sum()) if not inv_df.empty else 0
     total_left = int(inv_df["Quantity Left"].sum()) if not inv_df.empty else 0
     total_cost_sum = float(inv_df["Total Cost"].sum()) if not inv_df.empty else 0.0
+
     totals_row = {
-        "Item": "Total","Category":"","Lot ID":"","Purchase Date":"",
-        "Quantity Purchased": total_purchased,"Quantity Left": total_left,
-        "Unit Cost": "","Total Cost": money(total_cost_sum),
+        "Item": "Total",
+        "Category": "",
+        "Lot ID": "",
+        "Purchase Date": "",
+        "Quantity Purchased": total_purchased,
+        "Quantity Left": total_left,
+        "Unit Cost": "",
+        "Total Cost": money(total_cost_sum),
     }
+
     inv_fmt_with_total = (
         pd.concat([inv_fmt, pd.DataFrame([totals_row])], ignore_index=True)
         if not inv_fmt.empty else pd.DataFrame([totals_row])
     )
+
     st.dataframe(
         inv_fmt_with_total[
             ["Item","Category","Lot ID","Purchase Date","Quantity Purchased","Quantity Left","Unit Cost","Total Cost"]
@@ -299,43 +281,47 @@ def stock_table(inv_df):
         hide_index=True
     )
 
+
 def sales_profit_table(inv_df, sales_df):
     if sales_df.empty:
         st.info("No sales yet.")
         return
     cogs_list, _ = replay_fifo_and_inventory(inv_df, sales_df)
     s = sales_df.copy().reset_index(drop=True)
-    s["COGS"] = pd.Series(cogs_list).astype(float)
+    s["COGS (FIFO)"] = pd.Series(cogs_list).astype(float)
     unit_cost_per_sale = []
     for i, r in s.iterrows():
         qty = max(1, int(r["Quantity Sold"]))
-        unit_cost_per_sale.append(float(s.at[i,"COGS"]) / qty)
+        unit_cost_per_sale.append(float(s.at[i,"COGS (FIFO)"]) / qty)
     s["Unit Cost (Exact)"] = unit_cost_per_sale
     s["Total Revenue"] = s["Quantity Sold"] * s["Selling Price"]
-    s["Profit"] = s["Total Revenue"] - s["COGS"]
+    s["Profit"] = s["Total Revenue"] - s["COGS (FIFO)"]
 
     s_fmt = s.copy()
-    for c in ["Selling Price","Unit Cost (Exact)","Total Revenue","COGS","Profit"]:
+    for c in ["Selling Price","Unit Cost (Exact)","Total Revenue","COGS (FIFO)","Profit"]:
         s_fmt[c] = s_fmt[c].map(money)
 
-    display_cols = ["Date","Item","Category","Lot ID","Quantity Sold","Selling Price","Unit Cost (Exact)","COGS","Total Revenue","Profit"]
     totals = {
-        "Date": "Total","Item":"","Category":"","Lot ID":"",
+        "Date": "Total",
+        "Item": "",
+        "Category": "",
         "Quantity Sold": int(s["Quantity Sold"].sum() if not s.empty else 0),
-        "Selling Price": "","Unit Cost (Exact)":"",
-        "COGS": money(s["COGS"].sum() if not s.empty else 0.0),
+        "Selling Price": "",
+        "Unit Cost (Exact)": "",
+        "COGS (FIFO)": money(s["COGS (FIFO)"].sum() if not s.empty else 0.0),
         "Total Revenue": money(s["Total Revenue"].sum() if not s.empty else 0.0),
         "Profit": money(s["Profit"].sum() if not s.empty else 0.0),
     }
     s_fmt_tot = pd.concat([s_fmt, pd.DataFrame([totals])], ignore_index=True)
+
     st.dataframe(
-        s_fmt_tot[display_cols],
+        s_fmt_tot[["Date","Item","Category","Quantity Sold","Selling Price","Unit Cost (Exact)","COGS (FIFO)","Total Revenue","Profit"]],
         use_container_width=True,
         hide_index=True
     )
 
 # ------------------------------------------------------------------
-# Manage sections (inline Edit + Delete)
+# Manage sections (inline Edit + Delete) — SESSION-STATE FIX
 # ------------------------------------------------------------------
 def manage_purchases_section(inv_cat, category_name):
     exp_key = f"exp_pur_{category_name}"
@@ -350,6 +336,7 @@ def manage_purchases_section(inv_cat, category_name):
             rkey = f"{category_name}_pur_{int(row['Lot ID'])}_{i}"
             edit_key = f"edit_{rkey}"
             del_key  = f"del_{rkey}"
+            info_key = f"info_{rkey}"
 
             if edit_key not in st.session_state:
                 st.session_state[edit_key] = False
@@ -378,12 +365,13 @@ def manage_purchases_section(inv_cat, category_name):
             if c8.button("Info", key=f"info_btn_{rkey}_{i}"):
                 st.info(f"Purchase Date: {row.get('Purchase Date','')}")
 
+            # --- Edit form (persistent) ---
             if st.session_state[edit_key]:
                 with st.form(f"edit_pur_form_{rkey}_{i}", clear_on_submit=True):
                     new_name = st.text_input("Model Name", value=str(row["Item"]), key=f"name_{rkey}_{i}")
                     purchased_qty = int(row["Quantity Purchased"])
                     left_qty = int(row["Quantity Left"])
-                    consumed = purchased_qty - left_qty
+                    consumed = purchased_qty - left_qty  # cannot reduce below this
                     new_qty = st.number_input(
                         "Quantity Purchased (total for this lot)",
                         min_value=int(consumed),
@@ -417,6 +405,7 @@ def manage_purchases_section(inv_cat, category_name):
                         st.session_state[exp_key] = True
                         st.rerun()
 
+            # --- Delete form (persistent) ---
             if st.session_state[del_key]:
                 with st.form(f"del_pur_form_{rkey}_{i}", clear_on_submit=True):
                     pw = st.text_input("Enter password to delete this lot", type="password", key=f"pw_{rkey}_{i}")
@@ -446,18 +435,6 @@ def manage_purchases_section(inv_cat, category_name):
                                     st.session_state[exp_key] = True
                                     st.rerun()
 
-def _max_allowed_for_specific_lot(item, category, lot_id, exclude_sale_index=None):
-    inv_mask = (inventory["Item"]==item) & (inventory["Category"]==category) & (inventory["Lot ID"]==lot_id)
-    if not inv_mask.any():
-        return 0
-    lot_purchased = int(inventory.loc[inv_mask, "Quantity Purchased"].iloc[0])
-    s_mask = (sales["Item"]==item) & (sales["Category"]==category) & (sales["Lot ID"]==lot_id)
-    s_rows = sales[s_mask].copy()
-    if exclude_sale_index is not None and exclude_sale_index in s_rows.index:
-        s_rows = s_rows.drop(index=exclude_sale_index)
-    sold_other = int(s_rows["Quantity Sold"].sum()) if not s_rows.empty else 0
-    return max(0, lot_purchased - sold_other)
-
 def manage_sales_section(inv_cat, category_name):
     exp_key_sales = f"exp_sales_{category_name}"
     with st.expander("🗑️ Manage Sales Entries", expanded=st.session_state.get(exp_key_sales, False)):
@@ -479,10 +456,9 @@ def manage_sales_section(inv_cat, category_name):
             if del_key not in st.session_state:
                 st.session_state[del_key] = False
 
-            lot_tag = f" • Lot #{int(row['Lot ID'])}" if "Lot ID" in row and pd.notna(row["Lot ID"]) else ""
-            c1, c2, c3, c4, c5, c6, c7 = st.columns([1.6, 2.6, 1.2, 1.3, 1.4, 0.9, 0.9])
+            c1, c2, c3, c4, c5, c6, c7 = st.columns([1.6, 2.4, 1.2, 1.3, 1.4, 0.9, 0.9])
             c1.write(row["Date"])
-            c2.write(f"{row['Item']} ({row['Category']}){lot_tag}")
+            c2.write(f"{row['Item']} ({row['Category']})")
             c3.write(f"{int(row['Quantity Sold'])} pcs")
             c4.write(money(row["Selling Price"]))
             row_profit = float(row["Quantity Sold"]) * float(row["Selling Price"]) - float(cogs_list[i])
@@ -500,6 +476,7 @@ def manage_sales_section(inv_cat, category_name):
                 st.session_state[exp_key_sales] = True
                 st.rerun()
 
+            # --- Edit sale (persistent) ---
             if st.session_state[edit_key]:
                 with st.form(f"edit_sale_form_{rkey}_{i}", clear_on_submit=True):
                     new_qty = st.number_input("Quantity Sold", min_value=1, step=1, value=int(row["Quantity Sold"]), key=f"qty_sale_{rkey}_{i}")
@@ -508,12 +485,6 @@ def manage_sales_section(inv_cat, category_name):
                     if do_save:
                         master_idx = row["index"]
                         if master_idx in sales.index:
-                            if pd.notna(row.get("Lot ID", pd.NA)):
-                                lot_id = int(row["Lot ID"])
-                                max_allowed = _max_allowed_for_specific_lot(row["Item"], row["Category"], lot_id, exclude_sale_index=master_idx)
-                                if int(new_qty) > max_allowed:
-                                    st.error(f"Exceeds available for Lot #{lot_id}. Max allowed (considering other sales): {max_allowed}.")
-                                    st.stop()
                             sales.loc[master_idx, "Quantity Sold"] = int(new_qty)
                             sales.loc[master_idx, "Selling Price"] = float(new_sp)
                             sales.to_csv(SALES_PATH, index=False)
@@ -526,6 +497,7 @@ def manage_sales_section(inv_cat, category_name):
                             st.error("Could not locate the sale entry to edit.")
                             st.rerun()
 
+            # --- Delete sale (persistent) ---
             if st.session_state[del_key]:
                 with st.form(f"del_sale_form_{rkey}_{i}", clear_on_submit=True):
                     pw = st.text_input("Enter password to delete sale", type="password", key=f"pw_sale_{rkey}_{i}")
@@ -539,7 +511,7 @@ def manage_sales_section(inv_cat, category_name):
                                 sales.drop(index=master_idx, inplace=True)
                                 sales.to_csv(SALES_PATH, index=False)
                                 recompute_and_persist_inventory_left(inventory, sales)
-                                st.success("Sale deleted and stock returned via recompute.")
+                                st.success("Sale deleted and stock returned via FIFO recompute.")
                                 st.session_state[del_key] = False
                                 st.session_state[exp_key_sales] = True
                                 st.rerun()
@@ -616,154 +588,42 @@ def category_section(cat_name):
 
     manage_purchases_section(inv_cat, cat_name)
 
-    with st.expander("🧾 Sales & Profit (Exact costing: FIFO or Specific-Lot)", expanded=False):
+    with st.expander("🧾 Sales & Profit (FIFO exact costing)", expanded=False):
         sales_profit_table(inv_cat, sales_cat)
 
-    # ------------------- ENHANCED ADD-SALE (reactive controls) -------------------
     with st.expander("🛒 Add a Sale", expanded=False):
         items_for_sale = inv_cat.groupby("Item")["Quantity Left"].sum()
         items_for_sale = items_for_sale[items_for_sale > 0].index.tolist()
-
         if len(items_for_sale) == 0:
             st.info("No stock available to sell in this category.")
         else:
-            # keys
-            mode_key = f"sale_mode_{cat_name}"
-            item_key = f"sale_item_{cat_name}"
-            lot_sel_key = f"sale_lot_sel_{cat_name}"
-
-            # reset helpers
-            def _reset_sale_state():
-                for k in [
-                    lot_sel_key,
-                    f"sale_qty_{cat_name}",
-                    f"sale_price_{cat_name}",
-                    f"sale_qty_lot_{cat_name}",
-                    f"sale_price_lot_{cat_name}",
-                ]:
-                    if k in st.session_state:
-                        del st.session_state[k]
-
-            # radio OUTSIDE the form → instant rerun
-            st.radio(
-                "Costing mode",
-                ["FIFO (default)", "Specific Lot"],
-                key=mode_key,
-                horizontal=True,
-                on_change=_reset_sale_state
-            )
-
-            # item selector OUTSIDE the form → instant rerun
-            st.selectbox(
-                "Item",
-                items_for_sale,
-                key=item_key,
-                on_change=_reset_sale_state
-            )
-
-            selected_mode = st.session_state.get(mode_key, "FIFO (default)")
-            selected_item = st.session_state.get(item_key, items_for_sale[0])
-
-            if selected_mode == "Specific Lot":
-                # lot selector OUTSIDE the form → instant rerun
-                lots_avail = inv_cat[(inv_cat["Item"] == selected_item) & (inv_cat["Quantity Left"] > 0)].copy()
-                if lots_avail.empty:
-                    st.warning("This item currently has no lots with stock. Choose FIFO or another item.")
-                else:
-                    lot_labels = [
-                        f"Lot #{int(r['Lot ID'])} • Left {int(r['Quantity Left'])} • Cost {money(r['Unit Cost'])}"
-                        for _, r in lots_avail.iterrows()
-                    ]
-                    lot_ids = [int(r["Lot ID"]) for _, r in lots_avail.iterrows()]
-
-                    # maintain a stable default index (0) if missing or out of range
-                    default_idx = 0
-                    if lot_sel_key in st.session_state:
-                        try:
-                            prev_lot = int(st.session_state[lot_sel_key])
-                            if prev_lot in lot_ids:
-                                default_idx = lot_ids.index(prev_lot)
-                            else:
-                                st.session_state[lot_sel_key] = lot_ids[0]
-                        except:
-                            st.session_state[lot_sel_key] = lot_ids[0]
+            with st.form(f"add_sale_{cat_name}"):
+                item_sale = st.selectbox("Item", items_for_sale, key=f"sale_select_{cat_name}")
+                qty_sale = st.number_input("Quantity Sold", min_value=1, step=1, key=f"sale_qty_{cat_name}")
+                price_sale = st.number_input("Selling Price (₹/unit)", min_value=0.01, format="%.2f", key=f"sale_price_{cat_name}")
+                submit_sale = st.form_submit_button("Record Sale")
+                if submit_sale:
+                    current_left_total = int(inv_cat[inv_cat["Item"]==item_sale]["Quantity Left"].sum())
+                    if qty_sale > current_left_total:
+                        st.error(f"Not enough stock. Only {current_left_total} left across lots.")
                     else:
-                        st.session_state[lot_sel_key] = lot_ids[0]
-
-                    idx = st.selectbox(
-                        "Select Lot",
-                        options=list(range(len(lot_ids))),
-                        index=default_idx,
-                        format_func=lambda i: lot_labels[i],
-                        key=f"lot_index_display_{cat_name}",
-                        on_change=lambda: st.session_state.__setitem__(lot_sel_key, lot_ids[st.session_state[f"lot_index_display_{cat_name}"]])
-                    )
-                    st.session_state[lot_sel_key] = lot_ids[idx]
-
-            # Now the actual form only takes qty/price and records the sale
-            with st.form(f"add_sale_form_{cat_name}", clear_on_submit=True):
-                if selected_mode == "FIFO (default)":
-                    qty_sale = st.number_input("Quantity Sold", min_value=1, step=1, key=f"sale_qty_{cat_name}")
-                    price_sale = st.number_input("Selling Price (₹/unit)", min_value=0.01, format="%.2f", key=f"sale_price_{cat_name}")
-                    submit_sale = st.form_submit_button("Record Sale")
-                    if submit_sale:
-                        current_left_total = int(inv_cat[inv_cat["Item"]==selected_item]["Quantity Left"].sum())
-                        if qty_sale > current_left_total:
-                            st.error(f"Not enough stock. Only {current_left_total} left across lots.")
-                        else:
-                            new_sale = {
-                                "Date": str(date.today()),
-                                "Item": selected_item,
-                                "Category": cat_name,
-                                "Quantity Sold": int(qty_sale),
-                                "Selling Price": float(price_sale),
-                                "Lot ID": pd.NA  # FIFO sale
-                            }
-                            sales_updated = pd.concat([sales, pd.DataFrame([new_sale])], ignore_index=True)
-                            sales_updated.to_csv(SALES_PATH, index=False)
-                            recompute_and_persist_inventory_left(inventory, sales_updated)
-                            sales[:] = sales_updated
-                            st.success("Sale recorded via FIFO costing!")
-                            st.rerun()
-                else:
-                    lots_avail = inv_cat[(inv_cat["Item"] == selected_item) & (inv_cat["Quantity Left"] > 0)].copy()
-                    if lots_avail.empty:
-                        st.form_submit_button("Record Sale from Specific Lot", disabled=True)
-                        st.stop()
-                    chosen_lot_id = int(st.session_state[lot_sel_key])
-
-                    lot_row = lots_avail[lots_avail["Lot ID"] == chosen_lot_id].iloc[0]
-                    max_qty = int(lot_row["Quantity Left"])
-                    qty_sale = st.number_input(
-                        f"Quantity Sold (Lot #{chosen_lot_id} has {max_qty} left)",
-                        min_value=1, max_value=max_qty, step=1, key=f"sale_qty_lot_{cat_name}"
-                    )
-                    price_sale = st.number_input("Selling Price (₹/unit)", min_value=0.01, format="%.2f", key=f"sale_price_lot_{cat_name}")
-                    submit_sale = st.form_submit_button("Record Sale from Specific Lot")
-                    if submit_sale:
                         new_sale = {
                             "Date": str(date.today()),
-                            "Item": selected_item,
+                            "Item": item_sale,
                             "Category": cat_name,
                             "Quantity Sold": int(qty_sale),
-                            "Selling Price": float(price_sale),
-                            "Lot ID": int(chosen_lot_id)
+                            "Selling Price": float(price_sale)
                         }
                         sales_updated = pd.concat([sales, pd.DataFrame([new_sale])], ignore_index=True)
                         sales_updated.to_csv(SALES_PATH, index=False)
                         recompute_and_persist_inventory_left(inventory, sales_updated)
                         sales[:] = sales_updated
-                        st.success(f"Sale recorded from Lot #{chosen_lot_id}!")
+                        st.success("Sale recorded via FIFO costing!")
                         st.rerun()
-    # -----------------------------------------------------------------------------
 
     manage_sales_section(inv_cat, cat_name)
 
 def build_fifo_ledger(inv_df: pd.DataFrame, sales_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Build a per-sale-per-lot ledger. If sale row has Lot ID, allocate only from that lot.
-    Otherwise, allocate by FIFO.
-    """
     if inv_df.empty or sales_df.empty:
         return pd.DataFrame(columns=[
             "s_index","Date","Item","Category",
@@ -790,23 +650,11 @@ def build_fifo_ledger(inv_df: pd.DataFrame, sales_df: pd.DataFrame) -> pd.DataFr
         cat  = srow.get("Category")
         qty  = int(srow.get("Quantity Sold", 0))
         spu  = float(srow.get("Selling Price", 0.0))
-        lot_id = srow.get("Lot ID")
-        if pd.isna(lot_id):
-            lot_id = None
-        else:
-            lot_id = int(lot_id)
-        if qty <= 0: 
-            continue
+        if qty <= 0: continue
 
-        if lot_id is not None:
-            mask = (lots["Item"]==item) & (lots["Category"]==cat) & (lots["Lot ID"]==lot_id)
-            use_lots = lots[mask]
-        else:
-            mask = (lots["Item"] == item) & (lots["Category"] == cat)
-            use_lots = lots[mask]
-
-        if use_lots.empty: 
-            continue
+        mask = (lots["Item"] == item) & (lots["Category"] == cat)
+        use_lots = lots[mask]
+        if use_lots.empty: continue
 
         qty_left = qty
         for li in use_lots.index:
@@ -834,7 +682,7 @@ def build_fifo_ledger(inv_df: pd.DataFrame, sales_df: pd.DataFrame) -> pd.DataFr
 # UI
 # ------------------------------------------------------------------
 st.title("📊 TMF Accounting Dashboard")
-st.caption("Two categories: **Crown** and **WD** — separate purchases/sales with **per-lot exact costing**. Sales can be **FIFO** or **Specific Lot**. ₹1 Cr investment is **shared** and shown on the **All** tab.")
+st.caption("Two categories: **Crown** and **WD** — separate purchases/sales with **per-lot exact costing (FIFO)**. ₹1 Cr investment is **shared** and shown on the **All** tab.")
 
 tab_all, tab_crown, tab_wd = st.tabs(["All (Combined)", "Crown", "WD"])
 
@@ -842,17 +690,23 @@ tab_all, tab_crown, tab_wd = st.tabs(["All (Combined)", "Crown", "WD"])
 # All (Combined) tab (Detailed-only)
 # ------------------------------------------------------------------
 with tab_all:
+    # --- Detailed Financials (All) ---
     with st.expander("💼 Detailed Financials (All)", expanded=False):
+        # Capital Deployed = sum of all historical purchase spend
         capital_deployed = float((inventory["Quantity Purchased"] * inventory["Unit Cost"]).sum()) if not inventory.empty else 0.0
+        # Capital Recovered = all sales revenue
         total_revenue_all = float((sales["Quantity Sold"] * sales["Selling Price"]).sum()) if not sales.empty else 0.0
+        # Compute profit using FIFO (same approach as earlier)
         if not sales.empty:
             cogs_list_all, _ = replay_fifo_and_inventory(inventory, sales)
             total_cogs_all = float(sum(cogs_list_all))
         else:
             total_cogs_all = 0.0
         total_profit_all = total_revenue_all - total_cogs_all
+        # Current Capital Invested = Deployed - Recovered (revenue-based; change to stock value or COGS if desired)
         current_capital_invested = max(0.0, capital_deployed - total_revenue_all)
-        coc = (total_profit_all / TOTAL_INVESTMENT * 100.0) if TOTAL_INVESTMENT > 0 else 0.0
+        # Cash-on-Cash Return = Profit / Deployed
+        coc = (total_profit_all / capital_deployed * 100.0) if capital_deployed > 0 else 0.0
 
         cols1 = st.columns(4)
         cols1[0].metric("Total Investment Committed", shorten_currency(TOTAL_INVESTMENT))
@@ -862,16 +716,18 @@ with tab_all:
 
         cols2 = st.columns(4)
         cols2[0].metric("Total Profit", shorten_currency(total_profit_all))
+        # For consistency we can reuse break-even computed from combined metrics
         m_all_tmp = compute_metrics(inventory, sales, investment_total=TOTAL_INVESTMENT)
         cols2[1].metric("Est. Break-Even Period", m_all_tmp["break_even"])
         cols2[2].metric("Cash-on-Cash Return", f"{coc:.2f}%")
         cols2[3].metric("Stock Left (Items)", f"{m_all_tmp['stock_left_qty']}")
 
+    # Keep the other All-level tables
     with st.expander("📦 Stock Purchased — All (per-lot)", expanded=False):
         stock_table(inventory)
-    with st.expander("🧾 Sales & Profit — All (mixed costing)", expanded=False):
+    with st.expander("🧾 Sales & Profit — All (FIFO costing)", expanded=False):
         sales_profit_table(inventory, sales)
-
+    # --- Profit Sharing — Monthly (no duplicates) ---
     ledger_all = build_fifo_ledger(inventory, sales)
     with st.expander("🤝 Profit Sharing — Monthly (no duplicates)", expanded=False):
         if ledger_all.empty:
@@ -899,7 +755,8 @@ with tab_all:
                 use_container_width=True, hide_index=True
             )
 
-    with st.expander("📦 Profit Sharing — By Lot (exact)", expanded=False):
+    # --- Profit Sharing — By Lot (FIFO exact) ---
+    with st.expander("📦 Profit Sharing — By Lot (FIFO exact)", expanded=False):
         if ledger_all.empty:
             st.info("No sales yet.")
         else:
@@ -951,6 +808,7 @@ with tab_all:
                 use_container_width=True, hide_index=True
             )
 
+
 # ------------------------------------------------------------------
 # Category tabs
 # ------------------------------------------------------------------
@@ -958,3 +816,4 @@ with tab_crown:
     category_section("Crown")
 with tab_wd:
     category_section("WD")
+

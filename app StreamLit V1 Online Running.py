@@ -39,7 +39,7 @@ for _, row in sales.iterrows():
     cogs += unit_cost * row['Quantity Sold']
 
 profit = total_sales_revenue - cogs
-investment_left = investment_total - inventory['Total Cost'].sum() + profit
+investment_left = investment_total - inventory['Total Cost'].sum() #+ profit
 avg_daily_profit = profit / max(1, len(sales['Date'].unique()))
 break_even_days = (investment_total - profit) / avg_daily_profit if avg_daily_profit > 0 else float('inf')
 break_even_estimate = f"{int(break_even_days)} days" if break_even_days != float('inf') else "Not yet profitable"
@@ -80,7 +80,6 @@ sales['Profit'] = (sales['Selling Price'] - sales['Unit Cost']) * sales['Quantit
 
 sales_totals = pd.DataFrame([{
     "Date": "Total",
-    "Buyer Name": "",
     "Item": "",
     "Quantity Sold": sales["Quantity Sold"].sum(),
     "Unit Cost": "",
@@ -139,7 +138,7 @@ st.dataframe(
 st.subheader("➕ Add a Sale")
 with st.form("Add Sale"):
     item = st.selectbox("Item", inventory["Item"].unique())
-    buyer = st.text_input("Buyer Name")
+    #buyer = st.text_input("Buyer Name")
     qty = st.number_input("Quantity Sold", min_value=1)
     price = st.number_input("Selling Price", min_value=0.01, format="%.2f")
     submit = st.form_submit_button("Add Sale")
@@ -147,7 +146,7 @@ with st.form("Add Sale"):
     if submit:
         new_sale = {
             "Date": str(date.today()),
-            "Buyer Name": buyer,
+            #"Buyer Name": buyer,
             "Item": item,
             "Quantity Sold": qty,
             "Selling Price": price
@@ -168,7 +167,9 @@ for i, row in sales.iterrows():
     col2.write(row["Item"])
     col3.write(f"{row['Quantity Sold']} pcs")
     col4.write(f"₹{row['Selling Price']}")
-    col5.write(f"₹{row['Profit']}")
+    #col5.write(f"₹{row['Profit']}")
+    col5.write(f"₹{row['Profit']:.2f}")
+
 
     delete_trigger = col6.button("Delete", key=f"delete_btn_{i}")
 
