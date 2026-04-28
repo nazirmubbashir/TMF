@@ -851,7 +851,8 @@ with tab_all:
         else:
             total_cogs_all = 0.0
         total_profit_all = total_revenue_all - total_cogs_all
-        current_capital_invested = max(0.0, capital_deployed - total_revenue_all)
+        #current_capital_invested = max(0.0, capital_deployed - total_revenue_all)
+        current_capital_invested = (inventory["Quantity Left"] * inventory["Unit Cost"]).sum()
         coc = (total_profit_all / TOTAL_INVESTMENT * 100.0) if TOTAL_INVESTMENT > 0 else 0.0
 
         cols1 = st.columns(4)
