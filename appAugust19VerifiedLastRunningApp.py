@@ -79,18 +79,7 @@ def parse_date_safe(s):
     except Exception:
         return None
 
-def arrow_safe_lot_ids(df: pd.DataFrame) -> pd.DataFrame:
-    """Return a display copy whose Lot ID column has one Arrow-safe type."""
-    out = df.copy()
-    if "Lot ID" in out.columns:
-        lot_ids = pd.to_numeric(out["Lot ID"], errors="coerce")
-        out["Lot ID"] = lot_ids.map(
-            lambda value: "" if pd.isna(value) else str(int(value))
-        ).astype("string")
-    return out
-
 # ----------------------- Mixed FIFO/Specific-Lot core ------------------------
-@st.cache_data(show_spinner=False)
 def replay_fifo_and_inventory(inv_df: pd.DataFrame, sales_df: pd.DataFrame):
     """
     Replays sales into inventory to compute COGS per sale row and new Quantity Left per lot.
@@ -189,52 +178,6 @@ def recompute_and_persist_inventory_left(inv_df: pd.DataFrame, sales_df: pd.Data
     lots_out.to_csv(INV_PATH, index=False)
     return lots_out
 
-def apply_new_sale_to_inventory(inv_df: pd.DataFrame, sale: dict) -> pd.DataFrame:
-    """Deduct one new sale from current stock without replaying sale history."""
-    updated = inv_df.copy()
-    qty_left = int(sale["Quantity Sold"])
-    item = sale["Item"]
-    category = sale["Category"]
-    lot_id = sale.get("Lot ID", pd.NA)
-
-    eligible = (
-        (updated["Item"] == item)
-        & (updated["Category"] == category)
-        & (updated["Quantity Left"] > 0)
-    )
-    if pd.notna(lot_id):
-        eligible &= updated["Lot ID"] == int(lot_id)
-
-    candidate_indexes = updated.loc[eligible].copy()
-    candidate_indexes["_pdate"] = candidate_indexes["Purchase Date"].apply(parse_date_safe)
-    candidate_indexes = candidate_indexes.sort_values(
-        by=["_pdate", "Lot ID"], kind="stable"
-    ).index
-
-    available = int(updated.loc[candidate_indexes, "Quantity Left"].sum())
-    if qty_left <= 0 or available < qty_left:
-        raise ValueError(f"Only {available} units are currently available for this sale.")
-
-    for idx in candidate_indexes:
-        take = min(qty_left, int(updated.at[idx, "Quantity Left"]))
-        updated.at[idx, "Quantity Left"] -= take
-        qty_left -= take
-        if qty_left == 0:
-            break
-
-    return updated
-
-def persist_new_sale(inv_df: pd.DataFrame, sales_df: pd.DataFrame, sale: dict):
-    """Persist a new sale using an incremental stock update."""
-    inventory_updated = apply_new_sale_to_inventory(inv_df, sale)
-    sales_updated = pd.concat([sales_df, pd.DataFrame([sale])], ignore_index=True)
-    sales_updated["Lot ID"] = pd.to_numeric(
-        sales_updated["Lot ID"], errors="coerce"
-    ).astype("Int64")
-    sales_updated.to_csv(SALES_PATH, index=False)
-    inventory_updated.to_csv(INV_PATH, index=False)
-    return inventory_updated, sales_updated
-
 # ------------------------------------------------------------------
 # Load & migrate data
 # ------------------------------------------------------------------
@@ -253,7 +196,6 @@ if "Lot ID" not in inventory.columns:
             inventory.loc[idx, "Lot ID"] = j
 if "Purchase Date" not in inventory.columns:
     inventory["Purchase Date"] = str(date.today())
-inventory["Lot ID"] = pd.to_numeric(inventory["Lot ID"], errors="coerce").fillna(0).astype(int)
 for col in ["Quantity Purchased","Quantity Left"]:
     inventory[col] = pd.to_numeric(inventory.get(col, 0), errors="coerce").fillna(0).astype(int)
 inventory["Unit Cost"] = pd.to_numeric(inventory.get("Unit Cost", 0.0), errors="coerce").fillna(0.0).astype(float)
@@ -268,13 +210,12 @@ if "Selling Price" not in sales.columns:
     sales["Selling Price"] = 0.0
 if "Lot ID" not in sales.columns:
     sales["Lot ID"] = pd.NA  # new column for specific-lot sales; NaN means FIFO
-sales["Lot ID"] = pd.to_numeric(sales["Lot ID"], errors="coerce").astype("Int64")
 for col in ["Quantity Sold","Selling Price"]:
     sales[col] = pd.to_numeric(sales[col], errors="coerce").fillna(0.0)
 sales["Quantity Sold"] = sales["Quantity Sold"].astype(int)
 
-# Quantity Left is persisted after each mutation. A full historical replay is
-# intentionally reserved for sale edits/deletes, where allocations can change.
+# recompute inventory left based on all sales (FIFO or specific-lot)
+inventory = recompute_and_persist_inventory_left(inventory, sales)
 
 # ------------------------------------------------------------------
 # Metrics
@@ -350,7 +291,6 @@ def stock_table(inv_df):
         pd.concat([inv_fmt, pd.DataFrame([totals_row])], ignore_index=True)
         if not inv_fmt.empty else pd.DataFrame([totals_row])
     )
-    inv_fmt_with_total = arrow_safe_lot_ids(inv_fmt_with_total)
     st.dataframe(
         inv_fmt_with_total[
             ["Item","Category","Lot ID","Purchase Date","Quantity Purchased","Quantity Left","Unit Cost","Total Cost"]
@@ -388,7 +328,6 @@ def sales_profit_table(inv_df, sales_df):
         "Profit": money(s["Profit"].sum() if not s.empty else 0.0),
     }
     s_fmt_tot = pd.concat([s_fmt, pd.DataFrame([totals])], ignore_index=True)
-    s_fmt_tot = arrow_safe_lot_ids(s_fmt_tot)
     st.dataframe(
         s_fmt_tot[display_cols],
         use_container_width=True,
@@ -780,11 +719,10 @@ def category_section(cat_name):
                                 "Selling Price": float(price_sale),
                                 "Lot ID": pd.NA  # FIFO sale
                             }
-                            try:
-                                persist_new_sale(inventory, sales, new_sale)
-                            except ValueError as exc:
-                                st.error(str(exc))
-                                st.stop()
+                            sales_updated = pd.concat([sales, pd.DataFrame([new_sale])], ignore_index=True)
+                            sales_updated.to_csv(SALES_PATH, index=False)
+                            recompute_and_persist_inventory_left(inventory, sales_updated)
+                            sales[:] = sales_updated
                             st.success("Sale recorded via FIFO costing!")
                             st.rerun()
                 else:
@@ -811,18 +749,16 @@ def category_section(cat_name):
                             "Selling Price": float(price_sale),
                             "Lot ID": int(chosen_lot_id)
                         }
-                        try:
-                            persist_new_sale(inventory, sales, new_sale)
-                        except ValueError as exc:
-                            st.error(str(exc))
-                            st.stop()
+                        sales_updated = pd.concat([sales, pd.DataFrame([new_sale])], ignore_index=True)
+                        sales_updated.to_csv(SALES_PATH, index=False)
+                        recompute_and_persist_inventory_left(inventory, sales_updated)
+                        sales[:] = sales_updated
                         st.success(f"Sale recorded from Lot #{chosen_lot_id}!")
                         st.rerun()
     # -----------------------------------------------------------------------------
 
     manage_sales_section(inv_cat, cat_name)
 
-@st.cache_data(show_spinner=False)
 def build_fifo_ledger(inv_df: pd.DataFrame, sales_df: pd.DataFrame) -> pd.DataFrame:
     """
     Build a per-sale-per-lot ledger. If sale row has Lot ID, allocate only from that lot.
@@ -1003,7 +939,6 @@ with tab_all:
             bylot_tot = pd.concat([bylot, pd.DataFrame([totals])], ignore_index=True)
 
             df_show = bylot_tot.copy()
-            df_show = arrow_safe_lot_ids(df_show)
             for c in ["Revenue","COGS","Profit","Man A (Net)","Man B","Man C (From A)"]:
                 df_show[c] = df_show[c].map(money)
 
